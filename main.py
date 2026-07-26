@@ -257,16 +257,12 @@ def calendar_list():
     return {"calendar": calendar}
 
 
-def run_tool_loop(system: str, user_content: str) -> str:
-    """tool use 루프 — 이 서비스의 심장. 질문(/api/ask)과 자동 처리(/api/process)가 공유한다."""
-    history = [{"role": "user", "content": user_content}]
-
-    # v6: NOTION_MCP_TOKEN이 있으면 Notion의 MCP 서버(남이 만들어둔 도구 세트)를 연결.
-    # MCP 도구는 API가 서버 쪽에서 대신 실행해준다 — 우리 루프는 우리 도구만 실행하면 된다
+def anthropic_api_config():
+    """v6: NOTION_MCP_TOKEN이 있으면 Notion의 MCP 서버(남이 만들어둔 도구 세트)를 연결.
+    MCP 도구는 API가 서버 쪽에서 대신 실행해준다 — 우리 루프는 우리 도구만 실행하면 된다."""
     notion_token = os.getenv("NOTION_MCP_TOKEN")
     if notion_token:
-        api = client.beta.messages
-        extra = {
+        return client.beta.messages, {
             "betas": ["mcp-client-2025-11-20"],
             "mcp_servers": [
                 {
@@ -278,9 +274,14 @@ def run_tool_loop(system: str, user_content: str) -> str:
             ],
             "tools": TOOLS + [{"type": "mcp_toolset", "mcp_server_name": "notion"}],
         }
-    else:
-        api = client.messages
-        extra = {"tools": TOOLS}
+    return client.messages, {"tools": TOOLS}
+
+
+def run_tool_loop(system: str, user_content: str) -> str:
+    """tool use 루프 — v8까지의 심장. v9부터 질문(/api/ask)은 이 순정 루프를,
+    자동 처리(/api/process)는 LangGraph 그래프를 쓴다 — 같은 일, 두 구현의 대비."""
+    history = [{"role": "user", "content": user_content}]
+    api, extra = anthropic_api_config()
 
     # 모델이 도구를 그만 찾을 때까지 [호출 의사 → 실행 → 결과 반환] 반복.
     # v8 안전장치: 자율 루프에는 반드시 상한을 둔다 (무한 루프·폭주 비용 방지)
@@ -354,9 +355,126 @@ AGENT_PROMPT = """당신은 회의가 끝나면 후속 처리를 스스로 수�
 - 회의록과 검색 결과에 없는 내용은 지어내지 않는다"""
 
 
+# ── v9: LangGraph — 순정 루프를 그래프로 ──────────────────────────────────
+# LangGraph는 오케스트레이션(누가 언제 실행되는지)만 담당하고, 모델 호출은
+# 기존 Anthropic SDK 그대로다(Notion MCP 포함). 전환의 실익은 interrupt:
+# "위험한 도구(캘린더 등록) 실행 전 사람 승인"을 그래프 멈춤/재개로 얻는다.
+import uuid as _uuid  # noqa: E402
+from typing import TypedDict  # noqa: E402
+
+from langgraph.checkpoint.memory import MemorySaver  # noqa: E402
+from langgraph.graph import END, START, StateGraph  # noqa: E402
+from langgraph.types import Command, interrupt  # noqa: E402
+
+
+class AgentState(TypedDict):
+    history: list  # v3부터 쓰던 그 대화 이력 — 그래프의 "상태"가 됐을 뿐
+    stop_reason: str
+    report: str
+
+
+def agent_node(state: AgentState) -> dict:
+    """순정 루프의 'api.create 호출' 부분이 노드 하나가 된 것."""
+    api, extra = anthropic_api_config()
+    response = api.create(
+        model="claude-opus-4-8",
+        max_tokens=4096,
+        system=AGENT_PROMPT,
+        messages=state["history"],
+        **extra,
+    )
+    texts = [b.text for b in response.content if b.type == "text"]
+    return {
+        "history": state["history"] + [{"role": "assistant", "content": response.content}],
+        "stop_reason": response.stop_reason,
+        "report": texts[-1] if texts else "",
+    }
+
+
+def tools_node(state: AgentState) -> dict:
+    """순정 루프의 '도구 실행' 부분. 단, 캘린더 등록은 실행 전에 사람 승인을 받는다."""
+    blocks = [b for b in state["history"][-1]["content"] if b.type == "tool_use"]
+    schedule_calls = [b for b in blocks if b.name == "register_schedule"]
+
+    decision = {"approved": True}
+    if schedule_calls:
+        # interrupt: 그래프가 여기서 멈추고 상태가 저장된다.
+        # 사용자가 /api/approve로 답하면 이 지점부터 재개되어 답이 반환값이 된다
+        decision = interrupt(
+            {
+                "action": "register_schedule",
+                "message": "다음 일정을 캘린더에 등록하려 합니다. 승인하시겠습니까?",
+                "items": [b.input for b in schedule_calls],
+            }
+        )
+
+    tool_results = []
+    for b in blocks:
+        if b.name == "register_schedule" and not decision.get("approved", False):
+            result, is_error = "사용자가 일정 등록을 거부했습니다. 등록하지 않았습니다. 보고에 반영하세요.", False
+        else:
+            result, is_error = run_tool(b.name, b.input)
+        tool_results.append(
+            {
+                "type": "tool_result",
+                "tool_use_id": b.id,
+                "content": result,
+                "is_error": is_error,
+            }
+        )
+    return {"history": state["history"] + [{"role": "user", "content": tool_results}]}
+
+
+def route(state: AgentState) -> str:
+    """순정 루프의 if/break가 조건 엣지가 된 것."""
+    if state["stop_reason"] == "tool_use":
+        return "tools"
+    if state["stop_reason"] == "pause_turn":  # 서버측(MCP) 작업 재개
+        return "agent"
+    return END
+
+
+_builder = StateGraph(AgentState)
+_builder.add_node("agent", agent_node)
+_builder.add_node("tools", tools_node)
+_builder.add_edge(START, "agent")
+_builder.add_conditional_edges("agent", route, {"tools": "tools", "agent": "agent", END: END})
+_builder.add_edge("tools", "agent")
+# checkpointer: 매 단계의 상태 저장 — interrupt에서 멈췄다 재개하는 능력의 원천
+agent_graph = _builder.compile(checkpointer=MemorySaver())
+
+
+def graph_result(state: dict, config: dict, minutes_payload: dict | None = None) -> dict:
+    """그래프 실행 결과를 API 응답으로 변환 — 승인 대기 중인지 완료인지 구분."""
+    snapshot = agent_graph.get_state(config)
+    if snapshot.next:  # 그래프가 중간(interrupt)에 멈춰 있음
+        for task in snapshot.tasks:
+            if task.interrupts:
+                return {
+                    "status": "pending_approval",
+                    "thread_id": config["configurable"]["thread_id"],
+                    "approval": task.interrupts[0].value,
+                    "minutes": minutes_payload,
+                    "meeting_count": len(meetings),
+                    "calendar": calendar,
+                }
+    return {
+        "status": "done",
+        "report": state.get("report", ""),
+        "minutes": minutes_payload,
+        "meeting_count": len(meetings),
+        "calendar": calendar,
+    }
+
+
+class ApproveRequest(BaseModel):
+    thread_id: str
+    approved: bool
+
+
 @app.post("/api/process")
 def process_meeting(req: MeetingRequest):
-    # 1단계(고정): 회의록 생성 — v4의 Structured Output. 항상 실행되므로 루프 밖의 일반 코드
+    # 1단계(고정): 회의록 생성 — v4의 Structured Output. 항상 실행되므로 그래프 밖의 일반 코드
     response = client.messages.parse(
         model="claude-opus-4-8",
         max_tokens=2048,
@@ -367,17 +485,42 @@ def process_meeting(req: MeetingRequest):
     result = response.parsed_output.model_dump()
     meetings.append({"meeting_text": req.meeting_text, "minutes": result})
 
-    # 2단계(자율): 후속 처리 — 무엇을 할지는 모델이 회의록을 보고 판단한다
-    report = run_tool_loop(
-        AGENT_PROMPT,
-        f"방금 끝난 회의의 회의록:\n\n{json.dumps(result, ensure_ascii=False, indent=2)}\n\n후속 처리를 진행해 주세요.",
+    # 2단계(자율): LangGraph 그래프 실행. thread_id = 이 처리 건의 식별자 (승인 재개에 사용)
+    config = {"configurable": {"thread_id": _uuid.uuid4().hex}}
+    state = agent_graph.invoke(
+        {
+            "history": [
+                {
+                    "role": "user",
+                    "content": f"방금 끝난 회의의 회의록:\n\n{json.dumps(result, ensure_ascii=False, indent=2)}\n\n후속 처리를 진행해 주세요.",
+                }
+            ],
+            "stop_reason": "",
+            "report": "",
+        },
+        config,
     )
-    return {
-        "minutes": result,
-        "report": report,
-        "meeting_count": len(meetings),
-        "calendar": calendar,
-    }
+    return graph_result(state, config, minutes_payload=result)
+
+
+@app.post("/api/approve")
+def approve(req: ApproveRequest):
+    config = {"configurable": {"thread_id": req.thread_id}}
+
+    # 승인 대기 상태는 MemorySaver(인메모리)에만 있다 — 서버가 재시작되면(--reload 포함)
+    # 사라진다. 재개할 지점이 없으면 조용히 실패하지 말고 만료를 알린다
+    if not agent_graph.get_state(config).next:
+        return {
+            "status": "expired",
+            "report": "승인 대기 정보가 만료되었습니다 (서버 재시작 등). 회의를 다시 처리해 주세요.",
+            "minutes": None,
+            "meeting_count": len(meetings),
+            "calendar": calendar,
+        }
+
+    # Command(resume=...): interrupt에서 멈춘 그래프를 사용자의 결정과 함께 재개
+    state = agent_graph.invoke(Command(resume={"approved": req.approved}), config)
+    return graph_result(state, config)
 
 
 @app.post("/api/ask")

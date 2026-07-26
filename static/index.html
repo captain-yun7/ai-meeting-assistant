@@ -22,12 +22,20 @@
   </style>
 </head>
 <body>
-  <h1>📝 AI Meeting Assistant <small style="color:#888">v8</small></h1>
+  <h1>📝 AI Meeting Assistant <small style="color:#888">v9</small></h1>
   <p>회의 내용을 붙여넣으면 비서가 회의록 생성부터 후속 처리까지 알아서 합니다.</p>
   <textarea id="meeting-text" placeholder="회의 내용을 입력하세요..."></textarea>
   <button id="minutes-btn">✨ 회의 종료 — 알아서 처리</button>
 
   <!-- 서버는 데이터(JSON)를 주고, 화면이 그린다 -->
+  <div id="approval-card" style="margin-top:16px; padding:16px; background:#fff1f2; border:1px solid #fda4af; border-radius:8px; display:none;">
+    <strong>🙋 승인 요청</strong>
+    <p id="approval-message" style="margin:8px 0;"></p>
+    <ul id="approval-items" style="padding-left:20px; color:#374151;"></ul>
+    <button id="approve-btn" style="background:#16a34a;">승인</button>
+    <button id="reject-btn" style="background:#dc2626;">거부</button>
+  </div>
+
   <div id="agent-report" style="margin-top:16px; padding:16px; background:#fefce8; border:1px solid #fde68a; border-radius:8px; white-space:pre-wrap; display:none;"></div>
 
   <div id="minutes-view">
@@ -134,11 +142,7 @@
         if (!res.ok) throw new Error(`서버 오류 (${res.status})`);
         const data = await res.json();
         renderMinutes(data.minutes);
-        const report = document.getElementById("agent-report");
-        report.style.display = "block";
-        report.textContent = "🤖 비서 처리 보고\n\n" + data.report;
-        renderCalendar(data.calendar);
-        countLabel.textContent = `(기억 중인 회의: ${data.meeting_count}건)`;
+        handleProcessResult(data);
       } catch (err) {
         alert("오류: " + err.message);
       } finally {
@@ -146,6 +150,54 @@
         minutesBtn.textContent = "✨ 회의 종료 — 알아서 처리";
       }
     });
+
+    // v9: 처리 결과가 "완료"일 수도, "승인 대기"일 수도 있다
+    let pendingThreadId = null;
+
+    function handleProcessResult(data) {
+      renderCalendar(data.calendar);
+      countLabel.textContent = `(기억 중인 회의: ${data.meeting_count}건)`;
+      const report = document.getElementById("agent-report");
+      const card = document.getElementById("approval-card");
+
+      if (data.status === "pending_approval") {
+        pendingThreadId = data.thread_id;
+        document.getElementById("approval-message").textContent = data.approval.message;
+        const list = document.getElementById("approval-items");
+        list.innerHTML = "";
+        (data.approval.items || []).forEach((it) => {
+          const li = document.createElement("li");
+          li.textContent = `${it.date}${it.time ? " " + it.time : ""} — ${it.title}`;
+          list.appendChild(li);
+        });
+        card.style.display = "block";
+        report.style.display = "none";
+      } else {
+        card.style.display = "none";
+        report.style.display = "block";
+        report.textContent = "🤖 비서 처리 보고\n\n" + data.report;
+      }
+    }
+
+    async function sendApproval(approved) {
+      const card = document.getElementById("approval-card");
+      card.querySelectorAll("button").forEach((b) => (b.disabled = true));
+      try {
+        const res = await fetch("/api/approve", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ thread_id: pendingThreadId, approved }),
+        });
+        if (!res.ok) throw new Error(`서버 오류 (${res.status})`);
+        handleProcessResult(await res.json());
+      } catch (err) {
+        alert("오류: " + err.message);
+      } finally {
+        card.querySelectorAll("button").forEach((b) => (b.disabled = false));
+      }
+    }
+    document.getElementById("approve-btn").addEventListener("click", () => sendApproval(true));
+    document.getElementById("reject-btn").addEventListener("click", () => sendApproval(false));
 
     function renderCalendar(items) {
       document.getElementById("calendar-count").textContent = `(${items.length}건)`;

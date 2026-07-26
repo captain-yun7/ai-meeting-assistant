@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Meeting Assistant</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; max-width: 760px; margin: 40px auto; padding: 0 16px; color: #222; }
+    h1 { font-size: 1.5rem; }
+    textarea { width: 100%; height: 240px; padding: 12px; font-size: 14px; border: 1px solid #ccc; border-radius: 8px; box-sizing: border-box; }
+    button { margin-top: 12px; padding: 10px 24px; font-size: 15px; border: none; border-radius: 8px; background: #3b82f6; color: white; cursor: pointer; }
+    button:disabled { background: #9ca3af; }
+    #result { margin-top: 24px; padding: 16px; background: #f3f4f6; border-radius: 8px; white-space: pre-wrap; display: none; }
+  </style>
+</head>
+<body>
+  <h1>📝 AI Meeting Assistant <small style="color:#888">v1</small></h1>
+  <p>회의 내용을 붙여넣고 요약 버튼을 누르세요.</p>
+  <textarea id="meeting-text" placeholder="회의 내용을 입력하세요..."></textarea>
+  <button id="summarize-btn">요약하기</button>
+  <div id="result"></div>
+
+  <script>
+    const btn = document.getElementById("summarize-btn");
+    const resultBox = document.getElementById("result");
+
+    btn.addEventListener("click", async () => {
+      const meetingText = document.getElementById("meeting-text").value.trim();
+      if (!meetingText) return alert("회의 내용을 입력하세요.");
+
+      btn.disabled = true;
+      btn.textContent = "요약 중...";
+      try {
+        const res = await fetch("/api/summarize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ meeting_text: meetingText }),
+        });
+        if (!res.ok) throw new Error(`서버 오류 (${res.status})`);
+        const data = await res.json();
+        resultBox.style.display = "block";
+        resultBox.textContent = data.summary;
+      } catch (err) {
+        resultBox.style.display = "block";
+        resultBox.textContent = "오류: " + err.message;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "요약하기";
+      }
+    });
+  </script>
+</body>
+</html>

@@ -3,4 +3,4 @@ uvicorn
 anthropic
 python-dotenv
 sentence-transformers
-numpy
+chromadb

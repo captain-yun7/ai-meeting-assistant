@@ -130,45 +130,55 @@ def save_minutes(title: str) -> str:
 
 # v7: RAG — 회사 문서가 많아지면 전부 프롬프트에 넣을 수 없다(비용·컨텍스트 한계).
 # 그래서 "질문과 의미가 가까운 조각만 골라서" 넣는다:
-#   구축(서버 시작 시 1회): 문서 → 청킹 → 임베딩 → 저장
-#   검색(질문마다):        질문 임베딩 → 유사도 비교 → top-k만 반환
+#   구축(문서 업로드 시): 문서 → 청킹 → 임베딩 → 벡터 DB에 저장
+#   검색(질문마다):      질문 임베딩 → 유사도 검색 → top-k만 반환
+import uuid  # noqa: E402
+
+import chromadb  # noqa: E402
 from sentence_transformers import SentenceTransformer  # noqa: E402
-import numpy as np  # noqa: E402
 
 embedder = SentenceTransformer("intfloat/multilingual-e5-small")
-doc_chunks: list[dict] = []  # 미니 벡터 DB: [{"source", "text", "vector"}]
+
+# 벡터 DB(Chroma). 인메모리 모드 — 서버 재시작 시 초기화 (영속화하려면 PersistentClient 한 줄)
+chroma = chromadb.Client()
+docs_collection = chroma.create_collection(
+    "company-docs", metadata={"hnsw:space": "cosine"}  # 유사도 기준: 코사인
+)
 
 
 def index_document(source: str, text: str) -> int:
-    """문서 하나를 청킹→임베딩해서 인덱스에 추가한다. 추가된 청크 수를 반환."""
-    added = 0
+    """문서 하나를 청킹→임베딩해서 벡터 DB에 추가한다. 추가된 청크 수를 반환."""
     # 청킹: "## " 소제목 단위로 자른다 — 문서 구조를 살리는 가장 단순한 전략
-    for chunk in text.split("\n## "):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        vector = embedder.encode(f"passage: {chunk}", normalize_embeddings=True)
-        doc_chunks.append({"source": source, "text": chunk, "vector": vector})
-        added += 1
-    return added
-
-
-# 인덱스는 빈 상태로 시작한다 — 문서는 화면에서 업로드하는 순간 검색 대상이 된다.
-# (company-docs/는 업로드용 샘플 문서 모음)
+    chunks = [c.strip() for c in text.split("\n## ") if c.strip()]
+    if not chunks:
+        return 0
+    vectors = [
+        embedder.encode(f"passage: {c}", normalize_embeddings=True).tolist()
+        for c in chunks
+    ]
+    docs_collection.add(
+        ids=[uuid.uuid4().hex for _ in chunks],
+        embeddings=vectors,
+        documents=chunks,
+        metadatas=[{"source": source} for _ in chunks],
+    )
+    return len(chunks)
 
 
 def search_company_docs(query: str) -> str:
-    if not doc_chunks:
+    if docs_collection.count() == 0:
         return "인덱스에 문서가 없습니다. 화면의 '회사 문서' 섹션에서 규정 문서를 먼저 업로드해야 검색할 수 있습니다."
-    query_vector = embedder.encode(f"query: {query}", normalize_embeddings=True)
-    # 코사인 유사도 = (정규화된 벡터끼리의) 내적 — "의미가 가까운 순" 정렬
-    scored = sorted(
-        doc_chunks,
-        key=lambda c: float(np.dot(query_vector, c["vector"])),
-        reverse=True,
+    query_vector = embedder.encode(f"query: {query}", normalize_embeddings=True).tolist()
+    # 벡터 DB가 유사도 검색(top-k)을 대신해준다
+    result = docs_collection.query(
+        query_embeddings=[query_vector],
+        n_results=min(3, docs_collection.count()),
+        include=["documents", "metadatas"],
     )
-    top = scored[:3]
-    return "\n\n---\n\n".join(f"[{c['source']}]\n{c['text']}" for c in top)
+    return "\n\n---\n\n".join(
+        f"[{meta['source']}]\n{doc}"
+        for doc, meta in zip(result["documents"][0], result["metadatas"][0])
+    )
 
 
 TOOLS.append(
@@ -219,8 +229,8 @@ class DocUploadRequest(BaseModel):
 
 def doc_sources() -> list[dict]:
     counts: dict[str, int] = {}
-    for c in doc_chunks:
-        counts[c["source"]] = counts.get(c["source"], 0) + 1
+    for meta in docs_collection.get(include=["metadatas"])["metadatas"]:
+        counts[meta["source"]] = counts.get(meta["source"], 0) + 1
     return [{"source": s, "chunks": n} for s, n in counts.items()]
 
 

@@ -45,14 +45,18 @@ MINUTES_PROMPT = """당신은 회의록을 정리하는 전문 서기입니다.
 
 ASK_PROMPT = """당신은 회의 기록을 바탕으로 질문에 답하고 일을 처리하는 비서입니다.
 
+## 정보의 원천 (이 두 가지에 근거해서만 답한다)
+1. 아래 제공된 회의 기록
+2. search_company_docs로 검색한 회사 규정 — 질문이 회사 규정·절차와 조금이라도 관련되면(방문, 경비, 근태, 보안 등) 허락을 구하지 말고 먼저 검색한다
+
+두 원천 어디에도 없는 내용만 "기록에 없는 내용입니다"라고 답한다. 지어내지 않는다.
+
 ## 규칙
-- 아래 제공된 회의 기록에 근거해서만 답한다
-- 기록에 없는 내용은 "회의 기록에 없는 내용입니다"라고 답한다
 - 여러 회의에서 결정이 바뀐 경우, 가장 최근 회의의 결정을 기준으로 답하되 변경 이력을 덧붙인다
-- 답은 간결하게, 근거가 된 회의 번호를 함께 표시한다
+- 답은 간결하게, 근거를 함께 표시한다 (회의 번호, 규정 문서명)
 - 사용자가 일정 등록을 요청하면 register_schedule 도구를 사용한다. 등록 후 무엇을 등록했는지 알려준다
 - 사용자가 회의록 저장을 요청하면 저장 도구(Notion 도구가 연결되어 있으면 그것을, 아니면 save_minutes)를 사용하고, 어디에 저장했는지 알려준다
-- 도구를 사용할 일은 말로 예고만 하지 말고 같은 턴에서 바로 실행한다"""
+- 도구를 사용할 일은 말로 예고하거나 허락을 구하지 말고 같은 턴에서 바로 실행한다"""
 
 
 # v5: Tool Calling — LLM이 처음으로 "행동"한다.
@@ -124,9 +128,65 @@ def save_minutes(title: str) -> str:
     return f"저장 완료: {path}"
 
 
+# v7: RAG — 회사 문서가 많아지면 전부 프롬프트에 넣을 수 없다(비용·컨텍스트 한계).
+# 그래서 "질문과 의미가 가까운 조각만 골라서" 넣는다:
+#   구축(서버 시작 시 1회): 문서 → 청킹 → 임베딩 → 저장
+#   검색(질문마다):        질문 임베딩 → 유사도 비교 → top-k만 반환
+from sentence_transformers import SentenceTransformer  # noqa: E402
+import numpy as np  # noqa: E402
+
+embedder = SentenceTransformer("intfloat/multilingual-e5-small")
+DOCS_DIR = Path("company-docs")
+doc_chunks: list[dict] = []  # 미니 벡터 DB: [{"source", "text", "vector"}]
+
+
+def build_doc_index() -> None:
+    for doc_path in sorted(DOCS_DIR.glob("*.md")):
+        text = doc_path.read_text(encoding="utf-8")
+        # 청킹: "## " 소제목 단위로 자른다 — 문서 구조를 살리는 가장 단순한 전략
+        for chunk in text.split("\n## "):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            vector = embedder.encode(f"passage: {chunk}", normalize_embeddings=True)
+            doc_chunks.append(
+                {"source": doc_path.stem, "text": chunk, "vector": vector}
+            )
+    print(f"[RAG] 문서 인덱스 구축 완료: 청크 {len(doc_chunks)}개")
+
+
+def search_company_docs(query: str) -> str:
+    query_vector = embedder.encode(f"query: {query}", normalize_embeddings=True)
+    # 코사인 유사도 = (정규화된 벡터끼리의) 내적 — "의미가 가까운 순" 정렬
+    scored = sorted(
+        doc_chunks,
+        key=lambda c: float(np.dot(query_vector, c["vector"])),
+        reverse=True,
+    )
+    top = scored[:3]
+    return "\n\n---\n\n".join(f"[{c['source']}]\n{c['text']}" for c in top)
+
+
+build_doc_index()
+
+TOOLS.append(
+    {
+        "name": "search_company_docs",
+        "description": "회사 규정·정책 문서(경비, 보안, 근태 등)에서 관련 내용을 검색한다. 회사 규정이나 절차에 대한 질문이 나오면 반드시 이 도구로 검색해서 근거를 확보한 뒤 답한다.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "검색할 내용 (예: 야근 식대 지원)"},
+            },
+            "required": ["query"],
+        },
+    }
+)
+
 TOOL_FUNCTIONS = {
     "register_schedule": register_schedule,
     "save_minutes": save_minutes,
+    "search_company_docs": search_company_docs,
 }
 
 

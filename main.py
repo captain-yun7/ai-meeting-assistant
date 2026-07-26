@@ -54,6 +54,11 @@ class AskRequest(BaseModel):
     question: str
 
 
+@app.get("/api/meetings")
+def meeting_status():
+    return {"meeting_count": len(meetings)}
+
+
 @app.post("/api/summarize")
 def summarize(req: SummarizeRequest):
     response = client.messages.create(

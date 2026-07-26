@@ -33,6 +33,13 @@
     const resultBox = document.getElementById("result");
     const countLabel = document.getElementById("meeting-count");
 
+    // 기억은 서버에 있다 — 페이지를 새로 열면 서버에 실제 개수를 물어본다
+    fetch("/api/meetings")
+      .then((res) => res.json())
+      .then((data) => {
+        countLabel.textContent = `(기억 중인 회의: ${data.meeting_count}건)`;
+      });
+
     btn.addEventListener("click", async () => {
       const meetingText = document.getElementById("meeting-text").value.trim();
       if (!meetingText) return alert("회의 내용을 입력하세요.");

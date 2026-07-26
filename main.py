@@ -51,7 +51,8 @@ ASK_PROMPT = """당신은 회의 기록을 바탕으로 질문에 답하고 일�
 - 여러 회의에서 결정이 바뀐 경우, 가장 최근 회의의 결정을 기준으로 답하되 변경 이력을 덧붙인다
 - 답은 간결하게, 근거가 된 회의 번호를 함께 표시한다
 - 사용자가 일정 등록을 요청하면 register_schedule 도구를 사용한다. 등록 후 무엇을 등록했는지 알려준다
-- 사용자가 회의록 저장을 요청하면 저장 도구(save_minutes 또는 Notion 도구)를 사용하고, 어디에 저장했는지 알려준다"""
+- 사용자가 회의록 저장을 요청하면 저장 도구(Notion 도구가 연결되어 있으면 그것을, 아니면 save_minutes)를 사용하고, 어디에 저장했는지 알려준다
+- 도구를 사용할 일은 말로 예고만 하지 말고 같은 턴에서 바로 실행한다"""
 
 
 # v5: Tool Calling — LLM이 처음으로 "행동"한다.
@@ -215,7 +216,7 @@ def ask(req: AskRequest):
     while True:
         response = api.create(
             model="claude-opus-4-8",
-            max_tokens=1024,
+            max_tokens=4096,
             system=ASK_PROMPT,
             messages=history,
             **extra,
@@ -242,7 +243,11 @@ def ask(req: AskRequest):
                 )
         history.append({"role": "user", "content": tool_results})
 
-    answer = next(block.text for block in response.content if block.type == "text")
+    # 응답에는 텍스트 블록이 여러 개일 수 있다 (도구 사용 전 예고 + 사용 후 결과 보고).
+    # 사용자에게 보여줄 답은 마지막 텍스트 블록 — 도구 결과까지 반영된 최종 발화다.
+    # 도구만 부르다 끝나면 텍스트가 하나도 없을 수 있다
+    texts = [block.text for block in response.content if block.type == "text"]
+    answer = texts[-1] if texts else "답을 정리하지 못했습니다. 질문을 좁혀서 다시 시도해 주세요."
     return {"answer": answer, "meeting_count": len(meetings), "calendar": calendar}
 
 

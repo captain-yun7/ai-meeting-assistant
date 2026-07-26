@@ -7,32 +7,61 @@
   <style>
     body { font-family: -apple-system, sans-serif; max-width: 760px; margin: 40px auto; padding: 0 16px; color: #222; }
     h1 { font-size: 1.5rem; }
+    h2 { font-size: 1.1rem; }
     textarea { width: 100%; height: 240px; padding: 12px; font-size: 14px; border: 1px solid #ccc; border-radius: 8px; box-sizing: border-box; }
+    input[type="text"] { width: 100%; padding: 10px 12px; font-size: 14px; border: 1px solid #ccc; border-radius: 8px; box-sizing: border-box; }
     button { margin-top: 12px; padding: 10px 24px; font-size: 15px; border: none; border-radius: 8px; background: #3b82f6; color: white; cursor: pointer; }
     button:disabled { background: #9ca3af; }
-    #result { margin-top: 24px; padding: 16px; background: #f3f4f6; border-radius: 8px; white-space: pre-wrap; display: none; }
+    table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 14px; text-align: left; }
+    th { background: #f9fafb; }
+    #minutes-view { margin-top: 24px; display: none; }
+    .card { padding: 16px; background: #f3f4f6; border-radius: 8px; margin-bottom: 12px; }
+    #raw-json { padding: 16px; background: #1e293b; color: #a5f3fc; border-radius: 8px; overflow-x: auto; font-size: 13px; }
+    #answer { margin-top: 16px; padding: 16px; background: #eff6ff; border-radius: 8px; white-space: pre-wrap; display: none; }
   </style>
 </head>
 <body>
   <h1>📝 AI Meeting Assistant <small style="color:#888">v4</small></h1>
-  <p>회의 내용을 붙여넣고 요약 버튼을 누르세요.</p>
+  <p>회의 내용을 붙여넣고 회의록을 생성하세요.</p>
   <textarea id="meeting-text" placeholder="회의 내용을 입력하세요..."></textarea>
-  <button id="summarize-btn">요약하기</button>
-  <button id="minutes-btn" style="background:#8b5cf6;">회의록 데이터 생성 (JSON)</button>
-  <div id="result"></div>
-  <pre id="minutes" style="margin-top:16px; padding:16px; background:#1e293b; color:#a5f3fc; border-radius:8px; overflow-x:auto; font-size:13px; display:none;"></pre>
+  <button id="minutes-btn">회의록 생성</button>
+
+  <!-- 서버는 데이터(JSON)를 주고, 화면이 그린다 -->
+  <div id="minutes-view">
+    <div class="card">
+      <strong>한 줄 요약</strong>
+      <p id="mv-summary" style="margin:8px 0 0;"></p>
+    </div>
+    <div class="card">
+      <strong>결정사항</strong>
+      <ul id="mv-decisions" style="margin:8px 0 0;"></ul>
+    </div>
+    <div class="card">
+      <strong>Action Item</strong>
+      <table>
+        <thead><tr><th>담당자</th><th>할 일</th><th>기한</th></tr></thead>
+        <tbody id="mv-actions"></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <strong>다음 일정</strong>
+      <ul id="mv-schedule" style="margin:8px 0 0;"></ul>
+    </div>
+    <details>
+      <summary style="cursor:pointer; color:#666;">서버가 보낸 원본 데이터 (JSON)</summary>
+      <pre id="raw-json"></pre>
+    </details>
+  </div>
 
   <hr style="margin: 32px 0; border: none; border-top: 1px solid #e5e7eb;" />
 
-  <h2 style="font-size: 1.1rem;">💬 회의에 대해 질문하기 <small id="meeting-count" style="color:#888">(기억 중인 회의: 0건)</small></h2>
-  <input id="question" type="text" placeholder="예: 결제 모듈 도입 건은 지금 어떻게 하기로 했지?"
-         style="width:100%; padding:10px 12px; font-size:14px; border:1px solid #ccc; border-radius:8px; box-sizing:border-box;" />
+  <h2>💬 회의에 대해 질문하기 <small id="meeting-count" style="color:#888">(기억 중인 회의: 0건)</small></h2>
+  <input id="question" type="text" placeholder="예: 결제 모듈 도입 건은 지금 어떻게 하기로 했지?" />
   <button id="ask-btn">질문하기</button>
-  <div id="answer" style="margin-top:16px; padding:16px; background:#eff6ff; border-radius:8px; white-space:pre-wrap; display:none;"></div>
+  <div id="answer"></div>
 
   <script>
-    const btn = document.getElementById("summarize-btn");
-    const resultBox = document.getElementById("result");
     const countLabel = document.getElementById("meeting-count");
 
     // 기억은 서버에 있다 — 페이지를 새로 열면 서버에 실제 개수를 물어본다
@@ -42,34 +71,43 @@
         countLabel.textContent = `(기억 중인 회의: ${data.meeting_count}건)`;
       });
 
-    btn.addEventListener("click", async () => {
-      const meetingText = document.getElementById("meeting-text").value.trim();
-      if (!meetingText) return alert("회의 내용을 입력하세요.");
-
-      btn.disabled = true;
-      btn.textContent = "요약 중...";
-      try {
-        const res = await fetch("/api/summarize", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ meeting_text: meetingText }),
-        });
-        if (!res.ok) throw new Error(`서버 오류 (${res.status})`);
-        const data = await res.json();
-        resultBox.style.display = "block";
-        resultBox.textContent = data.summary;
-        countLabel.textContent = `(기억 중인 회의: ${data.meeting_count}건)`;
-      } catch (err) {
-        resultBox.style.display = "block";
-        resultBox.textContent = "오류: " + err.message;
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "요약하기";
-      }
-    });
-
     const minutesBtn = document.getElementById("minutes-btn");
-    const minutesBox = document.getElementById("minutes");
+    const minutesView = document.getElementById("minutes-view");
+
+    function renderMinutes(m) {
+      document.getElementById("mv-summary").textContent = m.one_line_summary;
+
+      const decisions = document.getElementById("mv-decisions");
+      decisions.innerHTML = "";
+      m.decisions.forEach((d) => {
+        const li = document.createElement("li");
+        li.textContent = d;
+        decisions.appendChild(li);
+      });
+
+      const actions = document.getElementById("mv-actions");
+      actions.innerHTML = "";
+      m.action_items.forEach((a) => {
+        const tr = document.createElement("tr");
+        [a.assignee, a.task, a.due ?? "-"].forEach((v) => {
+          const td = document.createElement("td");
+          td.textContent = v;
+          tr.appendChild(td);
+        });
+        actions.appendChild(tr);
+      });
+
+      const schedule = document.getElementById("mv-schedule");
+      schedule.innerHTML = "";
+      (m.next_schedule.length ? m.next_schedule : ["없음"]).forEach((s) => {
+        const li = document.createElement("li");
+        li.textContent = s;
+        schedule.appendChild(li);
+      });
+
+      document.getElementById("raw-json").textContent = JSON.stringify(m, null, 2);
+      minutesView.style.display = "block";
+    }
 
     minutesBtn.addEventListener("click", async () => {
       const meetingText = document.getElementById("meeting-text").value.trim();
@@ -85,14 +123,13 @@
         });
         if (!res.ok) throw new Error(`서버 오류 (${res.status})`);
         const data = await res.json();
-        minutesBox.style.display = "block";
-        minutesBox.textContent = JSON.stringify(data.minutes, null, 2);
+        renderMinutes(data.minutes);
+        countLabel.textContent = `(기억 중인 회의: ${data.meeting_count}건)`;
       } catch (err) {
-        minutesBox.style.display = "block";
-        minutesBox.textContent = "오류: " + err.message;
+        alert("오류: " + err.message);
       } finally {
         minutesBtn.disabled = false;
-        minutesBtn.textContent = "회의록 데이터 생성 (JSON)";
+        minutesBtn.textContent = "회의록 생성";
       }
     });
 

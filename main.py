@@ -136,7 +136,6 @@ from sentence_transformers import SentenceTransformer  # noqa: E402
 import numpy as np  # noqa: E402
 
 embedder = SentenceTransformer("intfloat/multilingual-e5-small")
-DOCS_DIR = Path("company-docs")
 doc_chunks: list[dict] = []  # 미니 벡터 DB: [{"source", "text", "vector"}]
 
 
@@ -154,13 +153,13 @@ def index_document(source: str, text: str) -> int:
     return added
 
 
-def build_doc_index() -> None:
-    for doc_path in sorted(DOCS_DIR.glob("*.md")):
-        index_document(doc_path.stem, doc_path.read_text(encoding="utf-8"))
-    print(f"[RAG] 기본 문서 인덱스 구축 완료: 청크 {len(doc_chunks)}개")
+# 인덱스는 빈 상태로 시작한다 — 문서는 화면에서 업로드하는 순간 검색 대상이 된다.
+# (company-docs/는 업로드용 샘플 문서 모음)
 
 
 def search_company_docs(query: str) -> str:
+    if not doc_chunks:
+        return "인덱스에 문서가 없습니다. 화면의 '회사 문서' 섹션에서 규정 문서를 먼저 업로드해야 검색할 수 있습니다."
     query_vector = embedder.encode(f"query: {query}", normalize_embeddings=True)
     # 코사인 유사도 = (정규화된 벡터끼리의) 내적 — "의미가 가까운 순" 정렬
     scored = sorted(
@@ -171,8 +170,6 @@ def search_company_docs(query: str) -> str:
     top = scored[:3]
     return "\n\n---\n\n".join(f"[{c['source']}]\n{c['text']}" for c in top)
 
-
-build_doc_index()
 
 TOOLS.append(
     {

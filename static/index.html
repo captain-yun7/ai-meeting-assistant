@@ -22,12 +22,14 @@
   </style>
 </head>
 <body>
-  <h1>📝 AI Meeting Assistant <small style="color:#888">v7</small></h1>
-  <p>회의 내용을 붙여넣고 회의록을 생성하세요.</p>
+  <h1>📝 AI Meeting Assistant <small style="color:#888">v8</small></h1>
+  <p>회의 내용을 붙여넣으면 비서가 회의록 생성부터 후속 처리까지 알아서 합니다.</p>
   <textarea id="meeting-text" placeholder="회의 내용을 입력하세요..."></textarea>
-  <button id="minutes-btn">회의록 생성</button>
+  <button id="minutes-btn">✨ 회의 종료 — 알아서 처리</button>
 
   <!-- 서버는 데이터(JSON)를 주고, 화면이 그린다 -->
+  <div id="agent-report" style="margin-top:16px; padding:16px; background:#fefce8; border:1px solid #fde68a; border-radius:8px; white-space:pre-wrap; display:none;"></div>
+
   <div id="minutes-view">
     <div class="card">
       <strong>한 줄 요약</strong>
@@ -122,9 +124,9 @@
       if (!meetingText) return alert("회의 내용을 입력하세요.");
 
       minutesBtn.disabled = true;
-      minutesBtn.textContent = "생성 중...";
+      minutesBtn.textContent = "처리 중... (회의록 생성 → 일정 등록 → 규정 확인 → 저장)";
       try {
-        const res = await fetch("/api/minutes", {
+        const res = await fetch("/api/process", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ meeting_text: meetingText }),
@@ -132,12 +134,16 @@
         if (!res.ok) throw new Error(`서버 오류 (${res.status})`);
         const data = await res.json();
         renderMinutes(data.minutes);
+        const report = document.getElementById("agent-report");
+        report.style.display = "block";
+        report.textContent = "🤖 비서 처리 보고\n\n" + data.report;
+        renderCalendar(data.calendar);
         countLabel.textContent = `(기억 중인 회의: ${data.meeting_count}건)`;
       } catch (err) {
         alert("오류: " + err.message);
       } finally {
         minutesBtn.disabled = false;
-        minutesBtn.textContent = "회의록 생성";
+        minutesBtn.textContent = "✨ 회의 종료 — 알아서 처리";
       }
     });
 

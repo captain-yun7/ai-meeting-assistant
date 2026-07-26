@@ -252,41 +252,14 @@ def meeting_status():
     return {"meeting_count": len(meetings)}
 
 
-@app.post("/api/minutes")
-def minutes(req: MeetingRequest):
-    response = client.messages.parse(
-        model="claude-opus-4-8",
-        max_tokens=2048,
-        system=MINUTES_PROMPT,
-        messages=[{"role": "user", "content": req.meeting_text}],
-        output_format=MeetingMinutes,  # 응답이 이 스키마를 따르도록 강제 + 자동 검증
-    )
-    result = response.parsed_output.model_dump()
-    meetings.append({"meeting_text": req.meeting_text, "minutes": result})
-    return {"minutes": result, "meeting_count": len(meetings)}
-
-
 @app.get("/api/calendar")
 def calendar_list():
     return {"calendar": calendar}
 
 
-@app.post("/api/ask")
-def ask(req: AskRequest):
-    if not meetings:
-        return {"answer": "저장된 회의가 없습니다. 먼저 회의록을 생성해 주세요.", "meeting_count": 0}
-
-    # 기억 = 저장해둔 회의록(JSON)을 프롬프트에 다시 넣어 보내는 것
-    context = "\n\n".join(
-        f"[회의 {i + 1}]\n{json.dumps(m['minutes'], ensure_ascii=False, indent=2)}"
-        for i, m in enumerate(meetings)
-    )
-    history = [
-        {
-            "role": "user",
-            "content": f"지금까지의 회의 기록:\n\n{context}\n\n질문: {req.question}",
-        }
-    ]
+def run_tool_loop(system: str, user_content: str) -> str:
+    """tool use 루프 — 이 서비스의 심장. 질문(/api/ask)과 자동 처리(/api/process)가 공유한다."""
+    history = [{"role": "user", "content": user_content}]
 
     # v6: NOTION_MCP_TOKEN이 있으면 Notion의 MCP 서버(남이 만들어둔 도구 세트)를 연결.
     # MCP 도구는 API가 서버 쪽에서 대신 실행해준다 — 우리 루프는 우리 도구만 실행하면 된다
@@ -309,12 +282,13 @@ def ask(req: AskRequest):
         api = client.messages
         extra = {"tools": TOOLS}
 
-    # tool use 루프: 모델이 도구를 그만 찾을 때까지 [호출 의사 → 실행 → 결과 반환] 반복
-    while True:
+    # 모델이 도구를 그만 찾을 때까지 [호출 의사 → 실행 → 결과 반환] 반복.
+    # v8 안전장치: 자율 루프에는 반드시 상한을 둔다 (무한 루프·폭주 비용 방지)
+    for _ in range(15):
         response = api.create(
             model="claude-opus-4-8",
             max_tokens=4096,
-            system=ASK_PROMPT,
+            system=system,
             messages=history,
             **extra,
         )
@@ -342,9 +316,79 @@ def ask(req: AskRequest):
 
     # 응답에는 텍스트 블록이 여러 개일 수 있다 (도구 사용 전 예고 + 사용 후 결과 보고).
     # 사용자에게 보여줄 답은 마지막 텍스트 블록 — 도구 결과까지 반영된 최종 발화다.
-    # 도구만 부르다 끝나면 텍스트가 하나도 없을 수 있다
+    # 상한(15회)까지 도구만 부르다 끝나면 텍스트가 하나도 없을 수 있다
     texts = [block.text for block in response.content if block.type == "text"]
-    answer = texts[-1] if texts else "답을 정리하지 못했습니다. 질문을 좁혀서 다시 시도해 주세요."
+    if not texts:
+        return "답을 정리하지 못했습니다 (도구 호출 상한에 도달). 질문을 좁혀서 다시 시도해 주세요."
+    return texts[-1]
+
+
+def meetings_context() -> str:
+    return "\n\n".join(
+        f"[회의 {i + 1}]\n{json.dumps(m['minutes'], ensure_ascii=False, indent=2)}"
+        for i, m in enumerate(meetings)
+    )
+
+
+# v8: Agent — 새 기술이 아니다. LLM + Prompt + Memory(v3) + Tool(v5·v6) + RAG(v7)가
+# 이미 다 모여 있고, 바뀌는 것은 하나: 사람이 한 건씩 시키던 것을 모델이 스스로 계획해서
+# 연쇄 실행한다. "무엇을 할지"의 주도권이 프롬프트의 지시에서 모델의 판단으로 넘어간다.
+AGENT_PROMPT = """당신은 회의가 끝나면 후속 처리를 스스로 수행하는 AI 회의 비서입니다.
+
+방금 끝난 회의의 회의록(JSON)이 주어집니다. 아래 임무를 스스로 판단해서 필요한 것을 모두 수행하세요.
+
+## 임무
+1. next_schedule의 일정들을 캘린더에 등록한다 (register_schedule)
+2. 회의 내용 중 회사 규정 확인이 필요한 사안(외부인 방문, 경비, 야근, 보안 등)이 있으면
+   search_company_docs로 규정을 검색해서 지켜야 할 것을 확인한다
+3. 회의록을 문서 저장소에 저장한다 (Notion 도구가 연결되어 있으면 그것을, 아니면 save_minutes)
+
+## 최종 보고 형식
+모든 처리가 끝나면 아래 형식으로 보고한다:
+- **처리한 일**: 등록한 일정, 저장 위치 (링크 포함)
+- **규정 확인 결과**: 관련 규정과 지켜야 할 것 (규정 문서가 없거나 관련 규정이 없으면 그렇게 표기)
+- **사람이 챙겨야 할 일**: 비서가 대신 못 하는 것 (승인, 예약 등)
+
+## 규칙
+- 허락을 구하거나 예고만 하지 말고 같은 턴에서 바로 실행한다
+- 회의록과 검색 결과에 없는 내용은 지어내지 않는다"""
+
+
+@app.post("/api/process")
+def process_meeting(req: MeetingRequest):
+    # 1단계(고정): 회의록 생성 — v4의 Structured Output. 항상 실행되므로 루프 밖의 일반 코드
+    response = client.messages.parse(
+        model="claude-opus-4-8",
+        max_tokens=2048,
+        system=MINUTES_PROMPT,
+        messages=[{"role": "user", "content": req.meeting_text}],
+        output_format=MeetingMinutes,
+    )
+    result = response.parsed_output.model_dump()
+    meetings.append({"meeting_text": req.meeting_text, "minutes": result})
+
+    # 2단계(자율): 후속 처리 — 무엇을 할지는 모델이 회의록을 보고 판단한다
+    report = run_tool_loop(
+        AGENT_PROMPT,
+        f"방금 끝난 회의의 회의록:\n\n{json.dumps(result, ensure_ascii=False, indent=2)}\n\n후속 처리를 진행해 주세요.",
+    )
+    return {
+        "minutes": result,
+        "report": report,
+        "meeting_count": len(meetings),
+        "calendar": calendar,
+    }
+
+
+@app.post("/api/ask")
+def ask(req: AskRequest):
+    if not meetings:
+        return {"answer": "저장된 회의가 없습니다. 먼저 회의를 처리해 주세요.", "meeting_count": 0}
+
+    answer = run_tool_loop(
+        ASK_PROMPT,
+        f"지금까지의 회의 기록:\n\n{meetings_context()}\n\n질문: {req.question}",
+    )
     return {"answer": answer, "meeting_count": len(meetings), "calendar": calendar}
 
 

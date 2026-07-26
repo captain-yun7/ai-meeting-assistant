@@ -1,4 +1,6 @@
 import json
+import os
+from pathlib import Path
 
 import anthropic
 from dotenv import load_dotenv
@@ -48,7 +50,8 @@ ASK_PROMPT = """당신은 회의 기록을 바탕으로 질문에 답하고 일�
 - 기록에 없는 내용은 "회의 기록에 없는 내용입니다"라고 답한다
 - 여러 회의에서 결정이 바뀐 경우, 가장 최근 회의의 결정을 기준으로 답하되 변경 이력을 덧붙인다
 - 답은 간결하게, 근거가 된 회의 번호를 함께 표시한다
-- 사용자가 일정 등록을 요청하면 register_schedule 도구를 사용한다. 등록 후 무엇을 등록했는지 알려준다"""
+- 사용자가 일정 등록을 요청하면 register_schedule 도구를 사용한다. 등록 후 무엇을 등록했는지 알려준다
+- 사용자가 회의록 저장을 요청하면 저장 도구(save_minutes 또는 Notion 도구)를 사용하고, 어디에 저장했는지 알려준다"""
 
 
 # v5: Tool Calling — LLM이 처음으로 "행동"한다.
@@ -77,6 +80,65 @@ def register_schedule(title: str, date: str, time: str | None = None) -> str:
     calendar.append({"title": title, "date": date, "time": time})
     when = f"{date} {time}" if time else date
     return f"등록 완료: {title} ({when})"
+
+
+# v6: 회의록 저장 도구.
+# 지금은 로컬 파일 저장(폴백)이지만, 인터페이스는 "Notion 저장"과 동일하다.
+# NOTION_MCP_TOKEN이 설정되면 아래 MCP 연결(ask 함수 참고)로 진짜 Notion에 저장된다.
+SAVE_DIR = Path("saved-minutes")
+
+TOOLS.append(
+    {
+        "name": "save_minutes",
+        "description": "가장 최근에 생성된 회의록을 문서 저장소에 저장한다. 사용자가 회의록 저장을 요청할 때 사용한다.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "문서 제목 (예: 2026-07-20 주간 개발 회의)"},
+            },
+            "required": ["title"],
+        },
+    }
+)
+
+
+def save_minutes(title: str) -> str:
+    if not meetings:
+        return "오류: 저장할 회의록이 없습니다"
+    latest = meetings[-1]["minutes"]
+    SAVE_DIR.mkdir(exist_ok=True)
+    safe_name = title.replace("/", "-")
+    path = SAVE_DIR / f"{safe_name}.md"
+
+    lines = [f"# {title}", "", f"> {latest['one_line_summary']}", "", "## 결정사항"]
+    lines += [f"- {d}" for d in latest["decisions"]]
+    lines += ["", "## Action Item", "| 담당자 | 할 일 | 기한 |", "|---|---|---|"]
+    lines += [
+        f"| {a['assignee']} | {a['task']} | {a['due'] or '-'} |"
+        for a in latest["action_items"]
+    ]
+    lines += ["", "## 다음 일정"]
+    lines += [f"- {s}" for s in latest["next_schedule"]] or ["- 없음"]
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return f"저장 완료: {path}"
+
+
+TOOL_FUNCTIONS = {
+    "register_schedule": register_schedule,
+    "save_minutes": save_minutes,
+}
+
+
+def run_tool(name: str, tool_input: dict) -> tuple[str, bool]:
+    """도구 실행 — 모델이 부르는 이름과 인자는 신뢰할 수 없는 입력이다(시스템 경계).
+    실패해도 서버를 죽이지 않고 오류를 tool_result로 돌려주면 모델이 스스로 복구한다."""
+    func = TOOL_FUNCTIONS.get(name)
+    if func is None:
+        return f"오류: '{name}'은(는) 존재하지 않는 도구입니다.", True
+    try:
+        return func(**tool_input), False
+    except Exception as e:
+        return f"오류: 도구 실행 실패 ({type(e).__name__}: {e})", True
 
 
 class MeetingRequest(BaseModel):
@@ -128,15 +190,39 @@ def ask(req: AskRequest):
         }
     ]
 
+    # v6: NOTION_MCP_TOKEN이 있으면 Notion의 MCP 서버(남이 만들어둔 도구 세트)를 연결.
+    # MCP 도구는 API가 서버 쪽에서 대신 실행해준다 — 우리 루프는 우리 도구만 실행하면 된다
+    notion_token = os.getenv("NOTION_MCP_TOKEN")
+    if notion_token:
+        api = client.beta.messages
+        extra = {
+            "betas": ["mcp-client-2025-11-20"],
+            "mcp_servers": [
+                {
+                    "type": "url",
+                    "url": "https://mcp.notion.com/mcp",
+                    "name": "notion",
+                    "authorization_token": notion_token,
+                }
+            ],
+            "tools": TOOLS + [{"type": "mcp_toolset", "mcp_server_name": "notion"}],
+        }
+    else:
+        api = client.messages
+        extra = {"tools": TOOLS}
+
     # tool use 루프: 모델이 도구를 그만 찾을 때까지 [호출 의사 → 실행 → 결과 반환] 반복
     while True:
-        response = client.messages.create(
+        response = api.create(
             model="claude-opus-4-8",
             max_tokens=1024,
             system=ASK_PROMPT,
-            tools=TOOLS,
             messages=history,
+            **extra,
         )
+        if response.stop_reason == "pause_turn":  # 서버측(MCP) 도구 작업이 길어지면 이어서 재개
+            history.append({"role": "assistant", "content": response.content})
+            continue
         if response.stop_reason != "tool_use":
             break
 
@@ -145,9 +231,14 @@ def ask(req: AskRequest):
         for block in response.content:
             if block.type == "tool_use":
                 # 실행은 우리 코드가 한다 — 모델은 이름과 입력만 정했을 뿐
-                result = register_schedule(**block.input)
+                result, is_error = run_tool(block.name, block.input)
                 tool_results.append(
-                    {"type": "tool_result", "tool_use_id": block.id, "content": result}
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result,
+                        "is_error": is_error,
+                    }
                 )
         history.append({"role": "user", "content": tool_results})
 

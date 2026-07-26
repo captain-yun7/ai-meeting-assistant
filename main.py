@@ -54,6 +54,31 @@ class AskRequest(BaseModel):
     question: str
 
 
+# v4: 출력의 "모양"을 스키마로 강제 — 프롬프트는 내용을, 스키마는 형식을 책임진다.
+# 요청 검증에 쓰던 pydantic을 LLM 출력 검증에 그대로 쓴다
+class ActionItem(BaseModel):
+    assignee: str  # 담당자가 없으면 "(미정)"
+    task: str
+    due: str | None  # 기한이 없으면 null
+
+
+class MeetingMinutes(BaseModel):
+    one_line_summary: str
+    decisions: list[str]
+    action_items: list[ActionItem]
+    next_schedule: list[str]
+
+
+MINUTES_PROMPT = """당신은 회의록을 정리하는 전문 서기입니다.
+
+## 규칙
+- 회의 내용에 실제로 나온 것만 쓴다. 없는 내용을 지어내지 않는다
+- 회의 중 번복된 결정은 최종 결정만 남기고, 번복 사실을 결정사항에 병기한다
+- decisions에는 결정된 것만 넣는다. 논의만 되고 결정 안 된 것은 제외한다
+- 담당자가 명시되지 않은 할 일은 assignee를 "(미정)"으로 한다
+- 기한이 명시되지 않은 할 일은 due를 null로 한다"""
+
+
 @app.get("/api/meetings")
 def meeting_status():
     return {"meeting_count": len(meetings)}
@@ -70,6 +95,18 @@ def summarize(req: SummarizeRequest):
     summary = next(block.text for block in response.content if block.type == "text")
     meetings.append({"meeting_text": req.meeting_text, "summary": summary})
     return {"summary": summary, "meeting_count": len(meetings)}
+
+
+@app.post("/api/minutes")
+def minutes(req: SummarizeRequest):
+    response = client.messages.parse(
+        model="claude-opus-4-8",
+        max_tokens=2048,
+        system=MINUTES_PROMPT,
+        messages=[{"role": "user", "content": req.meeting_text}],
+        output_format=MeetingMinutes,  # 응답이 이 스키마를 따르도록 강제 + 자동 검증
+    )
+    return {"minutes": response.parsed_output.model_dump()}
 
 
 @app.post("/api/ask")

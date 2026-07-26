@@ -14,11 +14,13 @@
   </style>
 </head>
 <body>
-  <h1>📝 AI Meeting Assistant <small style="color:#888">v3</small></h1>
+  <h1>📝 AI Meeting Assistant <small style="color:#888">v4</small></h1>
   <p>회의 내용을 붙여넣고 요약 버튼을 누르세요.</p>
   <textarea id="meeting-text" placeholder="회의 내용을 입력하세요..."></textarea>
   <button id="summarize-btn">요약하기</button>
+  <button id="minutes-btn" style="background:#8b5cf6;">회의록 데이터 생성 (JSON)</button>
   <div id="result"></div>
+  <pre id="minutes" style="margin-top:16px; padding:16px; background:#1e293b; color:#a5f3fc; border-radius:8px; overflow-x:auto; font-size:13px; display:none;"></pre>
 
   <hr style="margin: 32px 0; border: none; border-top: 1px solid #e5e7eb;" />
 
@@ -63,6 +65,34 @@
       } finally {
         btn.disabled = false;
         btn.textContent = "요약하기";
+      }
+    });
+
+    const minutesBtn = document.getElementById("minutes-btn");
+    const minutesBox = document.getElementById("minutes");
+
+    minutesBtn.addEventListener("click", async () => {
+      const meetingText = document.getElementById("meeting-text").value.trim();
+      if (!meetingText) return alert("회의 내용을 입력하세요.");
+
+      minutesBtn.disabled = true;
+      minutesBtn.textContent = "생성 중...";
+      try {
+        const res = await fetch("/api/minutes", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ meeting_text: meetingText }),
+        });
+        if (!res.ok) throw new Error(`서버 오류 (${res.status})`);
+        const data = await res.json();
+        minutesBox.style.display = "block";
+        minutesBox.textContent = JSON.stringify(data.minutes, null, 2);
+      } catch (err) {
+        minutesBox.style.display = "block";
+        minutesBox.textContent = "오류: " + err.message;
+      } finally {
+        minutesBtn.disabled = false;
+        minutesBtn.textContent = "회의록 데이터 생성 (JSON)";
       }
     });
 

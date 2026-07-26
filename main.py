@@ -33,8 +33,25 @@ SYSTEM_PROMPT = """당신은 회의록을 정리하는 전문 서기입니다.
 - (다음 회의·마감 등. 없으면 "없음")"""
 
 
+# v3: LLM API는 무상태(stateless) — "기억"은 우리가 저장했다가 매 요청에 실어 보내는 것.
+# 서버 메모리에만 저장하므로 서버를 재시작하면 사라진다 (수업 포인트 → DB는 범위 밖)
+meetings: list[dict] = []
+
+ASK_PROMPT = """당신은 회의 기록을 바탕으로 질문에 답하는 비서입니다.
+
+## 규칙
+- 아래 제공된 회의 기록에 근거해서만 답한다
+- 기록에 없는 내용은 "회의 기록에 없는 내용입니다"라고 답한다
+- 여러 회의에서 결정이 바뀐 경우, 가장 최근 회의의 결정을 기준으로 답하되 변경 이력을 덧붙인다
+- 답은 간결하게, 근거가 된 회의 번호를 함께 표시한다"""
+
+
 class SummarizeRequest(BaseModel):
     meeting_text: str
+
+
+class AskRequest(BaseModel):
+    question: str
 
 
 @app.post("/api/summarize")
@@ -46,6 +63,31 @@ def summarize(req: SummarizeRequest):
         messages=[{"role": "user", "content": req.meeting_text}],
     )
     summary = next(block.text for block in response.content if block.type == "text")
-    return {"summary": summary}
+    meetings.append({"meeting_text": req.meeting_text, "summary": summary})
+    return {"summary": summary, "meeting_count": len(meetings)}
+
+
+@app.post("/api/ask")
+def ask(req: AskRequest):
+    if not meetings:
+        return {"answer": "저장된 회의가 없습니다. 먼저 회의를 요약해 주세요.", "meeting_count": 0}
+
+    # 기억 = 저장해둔 요약을 프롬프트에 다시 넣어 보내는 것
+    context = "\n\n".join(
+        f"[회의 {i + 1}]\n{m['summary']}" for i, m in enumerate(meetings)
+    )
+    response = client.messages.create(
+        model="claude-opus-4-8",
+        max_tokens=1024,
+        system=ASK_PROMPT,
+        messages=[
+            {
+                "role": "user",
+                "content": f"지금까지의 회의 기록:\n\n{context}\n\n질문: {req.question}",
+            }
+        ],
+    )
+    answer = next(block.text for block in response.content if block.type == "text")
+    return {"answer": answer, "meeting_count": len(meetings)}
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

@@ -14,15 +14,24 @@
   </style>
 </head>
 <body>
-  <h1>📝 AI Meeting Assistant <small style="color:#888">v2</small></h1>
+  <h1>📝 AI Meeting Assistant <small style="color:#888">v3</small></h1>
   <p>회의 내용을 붙여넣고 요약 버튼을 누르세요.</p>
   <textarea id="meeting-text" placeholder="회의 내용을 입력하세요..."></textarea>
   <button id="summarize-btn">요약하기</button>
   <div id="result"></div>
 
+  <hr style="margin: 32px 0; border: none; border-top: 1px solid #e5e7eb;" />
+
+  <h2 style="font-size: 1.1rem;">💬 회의에 대해 질문하기 <small id="meeting-count" style="color:#888">(기억 중인 회의: 0건)</small></h2>
+  <input id="question" type="text" placeholder="예: 결제 모듈 도입 건은 지금 어떻게 하기로 했지?"
+         style="width:100%; padding:10px 12px; font-size:14px; border:1px solid #ccc; border-radius:8px; box-sizing:border-box;" />
+  <button id="ask-btn">질문하기</button>
+  <div id="answer" style="margin-top:16px; padding:16px; background:#eff6ff; border-radius:8px; white-space:pre-wrap; display:none;"></div>
+
   <script>
     const btn = document.getElementById("summarize-btn");
     const resultBox = document.getElementById("result");
+    const countLabel = document.getElementById("meeting-count");
 
     btn.addEventListener("click", async () => {
       const meetingText = document.getElementById("meeting-text").value.trim();
@@ -40,12 +49,42 @@
         const data = await res.json();
         resultBox.style.display = "block";
         resultBox.textContent = data.summary;
+        countLabel.textContent = `(기억 중인 회의: ${data.meeting_count}건)`;
       } catch (err) {
         resultBox.style.display = "block";
         resultBox.textContent = "오류: " + err.message;
       } finally {
         btn.disabled = false;
         btn.textContent = "요약하기";
+      }
+    });
+
+    const askBtn = document.getElementById("ask-btn");
+    const answerBox = document.getElementById("answer");
+
+    askBtn.addEventListener("click", async () => {
+      const question = document.getElementById("question").value.trim();
+      if (!question) return alert("질문을 입력하세요.");
+
+      askBtn.disabled = true;
+      askBtn.textContent = "답변 중...";
+      try {
+        const res = await fetch("/api/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question }),
+        });
+        if (!res.ok) throw new Error(`서버 오류 (${res.status})`);
+        const data = await res.json();
+        answerBox.style.display = "block";
+        answerBox.textContent = data.answer;
+        countLabel.textContent = `(기억 중인 회의: ${data.meeting_count}건)`;
+      } catch (err) {
+        answerBox.style.display = "block";
+        answerBox.textContent = "오류: " + err.message;
+      } finally {
+        askBtn.disabled = false;
+        askBtn.textContent = "질문하기";
       }
     });
   </script>

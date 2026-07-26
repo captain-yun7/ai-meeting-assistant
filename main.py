@@ -140,19 +140,24 @@ DOCS_DIR = Path("company-docs")
 doc_chunks: list[dict] = []  # 미니 벡터 DB: [{"source", "text", "vector"}]
 
 
+def index_document(source: str, text: str) -> int:
+    """문서 하나를 청킹→임베딩해서 인덱스에 추가한다. 추가된 청크 수를 반환."""
+    added = 0
+    # 청킹: "## " 소제목 단위로 자른다 — 문서 구조를 살리는 가장 단순한 전략
+    for chunk in text.split("\n## "):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        vector = embedder.encode(f"passage: {chunk}", normalize_embeddings=True)
+        doc_chunks.append({"source": source, "text": chunk, "vector": vector})
+        added += 1
+    return added
+
+
 def build_doc_index() -> None:
     for doc_path in sorted(DOCS_DIR.glob("*.md")):
-        text = doc_path.read_text(encoding="utf-8")
-        # 청킹: "## " 소제목 단위로 자른다 — 문서 구조를 살리는 가장 단순한 전략
-        for chunk in text.split("\n## "):
-            chunk = chunk.strip()
-            if not chunk:
-                continue
-            vector = embedder.encode(f"passage: {chunk}", normalize_embeddings=True)
-            doc_chunks.append(
-                {"source": doc_path.stem, "text": chunk, "vector": vector}
-            )
-    print(f"[RAG] 문서 인덱스 구축 완료: 청크 {len(doc_chunks)}개")
+        index_document(doc_path.stem, doc_path.read_text(encoding="utf-8"))
+    print(f"[RAG] 기본 문서 인덱스 구축 완료: 청크 {len(doc_chunks)}개")
 
 
 def search_company_docs(query: str) -> str:
@@ -208,6 +213,31 @@ class MeetingRequest(BaseModel):
 
 class AskRequest(BaseModel):
     question: str
+
+
+class DocUploadRequest(BaseModel):
+    filename: str
+    content: str
+
+
+def doc_sources() -> list[dict]:
+    counts: dict[str, int] = {}
+    for c in doc_chunks:
+        counts[c["source"]] = counts.get(c["source"], 0) + 1
+    return [{"source": s, "chunks": n} for s, n in counts.items()]
+
+
+@app.get("/api/docs")
+def docs_list():
+    return {"docs": doc_sources()}
+
+
+@app.post("/api/docs")
+def docs_upload(req: DocUploadRequest):
+    # 업로드 = RAG의 "구축 단계"가 실시간으로 일어나는 것: 청킹 → 임베딩 → 인덱스 추가
+    source = req.filename.rsplit(".", 1)[0]
+    added = index_document(source, req.content)
+    return {"added_chunks": added, "docs": doc_sources()}
 
 
 @app.get("/api/meetings")

@@ -64,6 +64,11 @@
   <h2 style="margin-top:32px;">📅 팀 캘린더 <small id="calendar-count" style="color:#888">(0건)</small></h2>
   <ul id="calendar-list" style="padding-left:20px; color:#374151;"></ul>
 
+  <h2 style="margin-top:32px;">📚 회사 문서 (검색 대상)</h2>
+  <p style="color:#666; font-size:14px;">규정·정책 문서(.md, .txt)를 올리면 즉시 검색 대상이 됩니다.</p>
+  <input id="doc-file" type="file" accept=".md,.txt" />
+  <ul id="doc-list" style="padding-left:20px; color:#374151;"></ul>
+
   <script>
     const countLabel = document.getElementById("meeting-count");
 
@@ -150,6 +155,35 @@
     fetch("/api/calendar")
       .then((res) => res.json())
       .then((data) => renderCalendar(data.calendar));
+
+    function renderDocs(docs) {
+      const list = document.getElementById("doc-list");
+      list.innerHTML = "";
+      docs.forEach((d) => {
+        const li = document.createElement("li");
+        li.textContent = `${d.source} (청크 ${d.chunks}개)`;
+        list.appendChild(li);
+      });
+    }
+
+    fetch("/api/docs")
+      .then((res) => res.json())
+      .then((data) => renderDocs(data.docs));
+
+    document.getElementById("doc-file").addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const content = await file.text();
+      const res = await fetch("/api/docs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: file.name, content }),
+      });
+      const data = await res.json();
+      renderDocs(data.docs);
+      alert(`"${file.name}" 인덱스 완료 (청크 ${data.added_chunks}개 추가) — 이제 검색됩니다.`);
+      e.target.value = "";
+    });
 
     const askBtn = document.getElementById("ask-btn");
     const answerBox = document.getElementById("answer");

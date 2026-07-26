@@ -27,5 +27,4 @@ def summarize(req: SummarizeRequest):
     summary = next(block.text for block in response.content if block.type == "text")
     return {"summary": summary}
 
-
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

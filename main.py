@@ -41,13 +41,42 @@ MINUTES_PROMPT = """당신은 회의록을 정리하는 전문 서기입니다.
 - 담당자가 명시되지 않은 할 일은 assignee를 "(미정)"으로 한다
 - 기한이 명시되지 않은 할 일은 due를 null로 한다"""
 
-ASK_PROMPT = """당신은 회의 기록을 바탕으로 질문에 답하는 비서입니다.
+ASK_PROMPT = """당신은 회의 기록을 바탕으로 질문에 답하고 일을 처리하는 비서입니다.
 
 ## 규칙
 - 아래 제공된 회의 기록에 근거해서만 답한다
 - 기록에 없는 내용은 "회의 기록에 없는 내용입니다"라고 답한다
 - 여러 회의에서 결정이 바뀐 경우, 가장 최근 회의의 결정을 기준으로 답하되 변경 이력을 덧붙인다
-- 답은 간결하게, 근거가 된 회의 번호를 함께 표시한다"""
+- 답은 간결하게, 근거가 된 회의 번호를 함께 표시한다
+- 사용자가 일정 등록을 요청하면 register_schedule 도구를 사용한다. 등록 후 무엇을 등록했는지 알려준다"""
+
+
+# v5: Tool Calling — LLM이 처음으로 "행동"한다.
+# 모델은 도구를 직접 실행하지 못한다. "이 도구를 이 입력으로 호출하고 싶다"는 의사만
+# 반환하고, 실행은 언제나 우리 코드가 한다. (실제 서비스라면 여기가 구글 캘린더 API 자리)
+calendar: list[dict] = []
+
+TOOLS = [
+    {
+        "name": "register_schedule",
+        "description": "팀 캘린더에 일정을 등록한다. 사용자가 회의·마감 등의 일정 등록을 요청할 때 사용한다.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "일정 제목"},
+                "date": {"type": "string", "description": "날짜 (회의록에 나온 표현 그대로. 예: 2026-08-04, 다음 주 월요일)"},
+                "time": {"type": "string", "description": "시간 (예: 10:00). 언급이 없으면 생략"},
+            },
+            "required": ["title", "date"],
+        },
+    }
+]
+
+
+def register_schedule(title: str, date: str, time: str | None = None) -> str:
+    calendar.append({"title": title, "date": date, "time": time})
+    when = f"{date} {time}" if time else date
+    return f"등록 완료: {title} ({when})"
 
 
 class MeetingRequest(BaseModel):
@@ -77,6 +106,11 @@ def minutes(req: MeetingRequest):
     return {"minutes": result, "meeting_count": len(meetings)}
 
 
+@app.get("/api/calendar")
+def calendar_list():
+    return {"calendar": calendar}
+
+
 @app.post("/api/ask")
 def ask(req: AskRequest):
     if not meetings:
@@ -87,19 +121,38 @@ def ask(req: AskRequest):
         f"[회의 {i + 1}]\n{json.dumps(m['minutes'], ensure_ascii=False, indent=2)}"
         for i, m in enumerate(meetings)
     )
-    response = client.messages.create(
-        model="claude-opus-4-8",
-        max_tokens=1024,
-        system=ASK_PROMPT,
-        messages=[
-            {
-                "role": "user",
-                "content": f"지금까지의 회의 기록:\n\n{context}\n\n질문: {req.question}",
-            }
-        ],
-    )
+    history = [
+        {
+            "role": "user",
+            "content": f"지금까지의 회의 기록:\n\n{context}\n\n질문: {req.question}",
+        }
+    ]
+
+    # tool use 루프: 모델이 도구를 그만 찾을 때까지 [호출 의사 → 실행 → 결과 반환] 반복
+    while True:
+        response = client.messages.create(
+            model="claude-opus-4-8",
+            max_tokens=1024,
+            system=ASK_PROMPT,
+            tools=TOOLS,
+            messages=history,
+        )
+        if response.stop_reason != "tool_use":
+            break
+
+        history.append({"role": "assistant", "content": response.content})
+        tool_results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                # 실행은 우리 코드가 한다 — 모델은 이름과 입력만 정했을 뿐
+                result = register_schedule(**block.input)
+                tool_results.append(
+                    {"type": "tool_result", "tool_use_id": block.id, "content": result}
+                )
+        history.append({"role": "user", "content": tool_results})
+
     answer = next(block.text for block in response.content if block.type == "text")
-    return {"answer": answer, "meeting_count": len(meetings)}
+    return {"answer": answer, "meeting_count": len(meetings), "calendar": calendar}
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

@@ -22,7 +22,7 @@
   </style>
 </head>
 <body>
-  <h1>📝 AI Meeting Assistant <small style="color:#888">v4</small></h1>
+  <h1>📝 AI Meeting Assistant <small style="color:#888">v5</small></h1>
   <p>회의 내용을 붙여넣고 회의록을 생성하세요.</p>
   <textarea id="meeting-text" placeholder="회의 내용을 입력하세요..."></textarea>
   <button id="minutes-btn">회의록 생성</button>
@@ -57,9 +57,12 @@
   <hr style="margin: 32px 0; border: none; border-top: 1px solid #e5e7eb;" />
 
   <h2>💬 회의에 대해 질문하기 <small id="meeting-count" style="color:#888">(기억 중인 회의: 0건)</small></h2>
-  <input id="question" type="text" placeholder="예: 결제 모듈 도입 건은 지금 어떻게 하기로 했지?" />
+  <input id="question" type="text" placeholder="예: 다음 회의 일정 캘린더에 등록해줘" />
   <button id="ask-btn">질문하기</button>
   <div id="answer"></div>
+
+  <h2 style="margin-top:32px;">📅 팀 캘린더 <small id="calendar-count" style="color:#888">(0건)</small></h2>
+  <ul id="calendar-list" style="padding-left:20px; color:#374151;"></ul>
 
   <script>
     const countLabel = document.getElementById("meeting-count");
@@ -133,6 +136,21 @@
       }
     });
 
+    function renderCalendar(items) {
+      document.getElementById("calendar-count").textContent = `(${items.length}건)`;
+      const list = document.getElementById("calendar-list");
+      list.innerHTML = "";
+      items.forEach((c) => {
+        const li = document.createElement("li");
+        li.textContent = `${c.date}${c.time ? " " + c.time : ""} — ${c.title}`;
+        list.appendChild(li);
+      });
+    }
+
+    fetch("/api/calendar")
+      .then((res) => res.json())
+      .then((data) => renderCalendar(data.calendar));
+
     const askBtn = document.getElementById("ask-btn");
     const answerBox = document.getElementById("answer");
 
@@ -153,6 +171,7 @@
         answerBox.style.display = "block";
         answerBox.textContent = data.answer;
         countLabel.textContent = `(기억 중인 회의: ${data.meeting_count}건)`;
+        if (data.calendar) renderCalendar(data.calendar);
       } catch (err) {
         answerBox.style.display = "block";
         answerBox.textContent = "오류: " + err.message;

@@ -391,27 +391,53 @@ def agent_node(state: AgentState) -> dict:
     }
 
 
+# 승인이 필요한 도구 = "쓰기" 도구. 되돌리기 어려운 행동만 사람에게 묻는다.
+# 읽기(search_company_docs)까지 물으면 승인 피로만 쌓이고 실제로 안전해지지는 않는다.
+#
+# 주의: Notion MCP 도구는 이 집합에 넣어도 소용없다. MCP 도구는 API 서버가 대신
+# 실행하므로 우리 루프에 실행 대상으로 도착하지 않는다 — 클라이언트에서 막으려면
+# MCP 대신 우리 커스텀 도구로 감싸야 한다. (편리함과 통제력의 맞교환)
+APPROVAL_REQUIRED = {"register_schedule", "save_minutes"}
+
+
+def approval_label(name: str, tool_input: dict) -> str:
+    """승인 카드에 보여줄 한 줄 요약 — 사용자는 무엇을 승인하는지 알아야 한다."""
+    if name == "register_schedule":
+        when = " ".join(filter(None, [tool_input.get("date"), tool_input.get("time")]))
+        return f"일정 등록: {when} — {tool_input.get('title', '(제목 없음)')}"
+    if name == "save_minutes":
+        return f"회의록 저장: {tool_input.get('title', '(제목 없음)')}"
+    return f"{name}: {tool_input}"
+
+
 def tools_node(state: AgentState) -> dict:
-    """순정 루프의 '도구 실행' 부분. 단, 캘린더 등록은 실행 전에 사람 승인을 받는다."""
+    """순정 루프의 '도구 실행' 부분. 단, 쓰기 도구는 실행 전에 사람 승인을 받는다."""
     blocks = [b for b in state["history"][-1]["content"] if b.type == "tool_use"]
-    schedule_calls = [b for b in blocks if b.name == "register_schedule"]
+    write_calls = [b for b in blocks if b.name in APPROVAL_REQUIRED]
 
     decision = {"approved": True}
-    if schedule_calls:
+    if write_calls:
         # interrupt: 그래프가 여기서 멈추고 상태가 저장된다.
         # 사용자가 /api/approve로 답하면 이 지점부터 재개되어 답이 반환값이 된다
         decision = interrupt(
             {
-                "action": "register_schedule",
-                "message": "다음 일정을 캘린더에 등록하려 합니다. 승인하시겠습니까?",
-                "items": [b.input for b in schedule_calls],
+                "action": "write_tools",
+                "message": "다음 작업을 실행하려 합니다. 승인하시겠습니까?",
+                "items": [
+                    {"tool": b.name, "label": approval_label(b.name, b.input)}
+                    for b in write_calls
+                ],
             }
         )
 
+    approved = decision.get("approved", False)
     tool_results = []
     for b in blocks:
-        if b.name == "register_schedule" and not decision.get("approved", False):
-            result, is_error = "사용자가 일정 등록을 거부했습니다. 등록하지 않았습니다. 보고에 반영하세요.", False
+        if b.name in APPROVAL_REQUIRED and not approved:
+            result, is_error = (
+                f"사용자가 '{b.name}' 실행을 거부했습니다. 실행하지 않았습니다. 보고에 반영하세요.",
+                False,
+            )
         else:
             result, is_error = run_tool(b.name, b.input)
         tool_results.append(

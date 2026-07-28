@@ -165,9 +165,10 @@
         document.getElementById("approval-message").textContent = data.approval.message;
         const list = document.getElementById("approval-items");
         list.innerHTML = "";
+        // 서버가 사람이 읽을 요약(label)을 만들어 준다 — 화면은 그리기만 한다
         (data.approval.items || []).forEach((it) => {
           const li = document.createElement("li");
-          li.textContent = `${it.date}${it.time ? " " + it.time : ""} — ${it.title}`;
+          li.textContent = it.label;
           list.appendChild(li);
         });
         card.style.display = "block";

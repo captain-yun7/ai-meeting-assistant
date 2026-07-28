@@ -310,7 +310,12 @@ def refresh_notion_token() -> bool:
     req = urllib.request.Request(
         endpoint,
         data=payload,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            # 기본 python-urllib User-Agent는 Cloudflare가 차단한다 (error 1010)
+            "User-Agent": "ai-meeting-assistant-oauth/1.0",
+            "Accept": "application/json",
+        },
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as r:

@@ -1,5 +1,7 @@
 import json
 import os
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import anthropic
@@ -277,22 +279,92 @@ def anthropic_api_config():
     return client.messages, {"tools": TOOLS}
 
 
+# OAuth access token은 만료된다. 만료될 때마다 브라우저 인증을 다시 하는 대신,
+# 발급 때 함께 받아둔 refresh token으로 서버가 무인 갱신한다 (RFC 6749 §6).
+ENV_PATH = Path(__file__).resolve().parent / ".env"
+
+
+def _persist_env(updates: dict[str, str]) -> None:
+    """갱신된 토큰을 .env에 남긴다 — 서버를 재시작해도 유지되도록."""
+    lines = ENV_PATH.read_text().splitlines() if ENV_PATH.exists() else []
+    lines = [l for l in lines if l.split("=", 1)[0] not in updates]
+    lines += [f"{k}={v}" for k, v in updates.items()]
+    ENV_PATH.write_text("\n".join(lines) + "\n")
+
+
+def refresh_notion_token() -> bool:
+    """만료된 Notion MCP 토큰을 갱신한다. 성공하면 True."""
+    refresh_token = os.getenv("NOTION_MCP_REFRESH_TOKEN")
+    client_id = os.getenv("NOTION_MCP_CLIENT_ID")
+    endpoint = os.getenv("NOTION_MCP_TOKEN_ENDPOINT", "https://mcp.notion.com/token")
+    if not (refresh_token and client_id):
+        return False
+
+    payload = urllib.parse.urlencode(
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,  # 공개 클라이언트라 client_secret은 없다
+        }
+    ).encode()
+    req = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            token = json.load(r)
+    except Exception as e:
+        print(f"[notion] 토큰 갱신 실패: {type(e).__name__}: {e}")
+        return False
+
+    updates = {"NOTION_MCP_TOKEN": token["access_token"]}
+    # 갱신 시 refresh token 자체가 회전되는 서버가 있다 — 새로 오면 갈아끼운다
+    if token.get("refresh_token"):
+        updates["NOTION_MCP_REFRESH_TOKEN"] = token["refresh_token"]
+    os.environ.update(updates)
+    _persist_env(updates)
+    print("[notion] 토큰을 갱신했습니다.")
+    return True
+
+
+def is_mcp_auth_error(e: Exception) -> bool:
+    # API가 MCP 인증 실패를 별도 코드로 주지 않아 메시지로 판별할 수밖에 없다
+    message = str(e)
+    return "MCP" in message and "uthentication" in message
+
+
+def create_message(system: str, messages: list) -> object:
+    """모델 호출 지점을 한 곳으로 모은다 — MCP 토큰이 만료됐으면 갱신 후 1회 재시도.
+    갱신도 실패하면 MCP 없이 진행한다: 토큰 하나 때문에 수업 전체가 멈추면 안 된다."""
+    api, extra = anthropic_api_config()
+    try:
+        return api.create(
+            model="claude-opus-4-8", max_tokens=4096, system=system, messages=messages, **extra
+        )
+    except anthropic.BadRequestError as e:
+        if not is_mcp_auth_error(e):
+            raise
+        if refresh_notion_token():
+            api, extra = anthropic_api_config()  # 새 토큰으로 설정을 다시 만든다
+        else:
+            print("[notion] 갱신 불가 — MCP 없이 진행합니다 (회의록은 로컬에 저장됩니다).")
+            api, extra = client.messages, {"tools": TOOLS}
+        return api.create(
+            model="claude-opus-4-8", max_tokens=4096, system=system, messages=messages, **extra
+        )
+
+
 def run_tool_loop(system: str, user_content: str) -> str:
     """tool use 루프 — v8까지의 심장. v9부터 질문(/api/ask)은 이 순정 루프를,
     자동 처리(/api/process)는 LangGraph 그래프를 쓴다 — 같은 일, 두 구현의 대비."""
     history = [{"role": "user", "content": user_content}]
-    api, extra = anthropic_api_config()
 
     # 모델이 도구를 그만 찾을 때까지 [호출 의사 → 실행 → 결과 반환] 반복.
     # v8 안전장치: 자율 루프에는 반드시 상한을 둔다 (무한 루프·폭주 비용 방지)
     for _ in range(15):
-        response = api.create(
-            model="claude-opus-4-8",
-            max_tokens=4096,
-            system=system,
-            messages=history,
-            **extra,
-        )
+        response = create_message(system, history)
         if response.stop_reason == "pause_turn":  # 서버측(MCP) 도구 작업이 길어지면 이어서 재개
             history.append({"role": "assistant", "content": response.content})
             continue
@@ -375,14 +447,7 @@ class AgentState(TypedDict):
 
 def agent_node(state: AgentState) -> dict:
     """순정 루프의 'api.create 호출' 부분이 노드 하나가 된 것."""
-    api, extra = anthropic_api_config()
-    response = api.create(
-        model="claude-opus-4-8",
-        max_tokens=4096,
-        system=AGENT_PROMPT,
-        messages=state["history"],
-        **extra,
-    )
+    response = create_message(AGENT_PROMPT, state["history"])
     texts = [b.text for b in response.content if b.type == "text"]
     return {
         "history": state["history"] + [{"role": "assistant", "content": response.content}],

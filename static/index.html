@@ -67,6 +67,10 @@
   <hr style="margin: 32px 0; border: none; border-top: 1px solid #e5e7eb;" />
 
   <h2>💬 회의에 대해 질문하기 <small id="meeting-count" style="color:#888">(기억 중인 회의: 0건)</small></h2>
+  <p style="margin:4px 0 12px; font-size:13px; color:#b45309;">
+    ⚠️ 이 경로는 순정 tool use 루프라 <strong>승인 없이 바로 실행</strong>됩니다.
+    루프는 중간에 멈출 수 없기 때문입니다 — 위 "회의 종료" 경로가 그래프(LangGraph)를 쓰는 이유가 이것입니다.
+  </p>
   <input id="question" type="text" placeholder="예: 다음 회의 일정 캘린더에 등록해줘 / 회의록 노션에 저장해줘 / 결제 모듈 어떻게 하기로 했지?" />
   <button id="ask-btn">질문하기</button>
   <div id="answer"></div>

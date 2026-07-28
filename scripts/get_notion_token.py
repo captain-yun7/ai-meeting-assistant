@@ -138,18 +138,28 @@ def main() -> None:
         ).encode(),
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
-    access_token = token["access_token"]
-
-    # .env 기록 (기존 줄 교체 또는 추가)
+    # access_token만 저장하면 만료 시 이 브라우저 인증을 처음부터 다시 해야 한다.
+    # refresh_token과 client_id를 함께 남겨두면 서버가 무인으로 갱신할 수 있다
+    # (client_id는 동적 등록으로 매번 새로 발급되므로, 짝이 맞아야 갱신이 된다)
+    updates = {
+        "NOTION_MCP_TOKEN": token["access_token"],
+        "NOTION_MCP_REFRESH_TOKEN": token.get("refresh_token", ""),
+        "NOTION_MCP_CLIENT_ID": client_id,
+        "NOTION_MCP_TOKEN_ENDPOINT": meta["token_endpoint"],
+    }
     lines = ENV_PATH.read_text().splitlines() if ENV_PATH.exists() else []
-    lines = [l for l in lines if not l.startswith("NOTION_MCP_TOKEN=")]
-    lines.append(f"NOTION_MCP_TOKEN={access_token}")
+    lines = [l for l in lines if l.split("=", 1)[0] not in updates]
+    lines += [f"{k}={v}" for k, v in updates.items()]
     ENV_PATH.write_text("\n".join(lines) + "\n")
 
     expires = token.get("expires_in")
-    print("✅ 토큰 발급 완료 — .env의 NOTION_MCP_TOKEN에 저장했습니다.")
+    print("✅ 토큰 발급 완료 — .env에 저장했습니다.")
     if expires:
-        print(f"   (만료: 약 {int(expires) // 3600}시간 후 — 수업 당일 재발급 권장)")
+        print(f"   (만료: 약 {int(expires) // 3600}시간 후)")
+    if updates["NOTION_MCP_REFRESH_TOKEN"]:
+        print("   refresh token도 저장됨 — 만료되면 서버가 알아서 갱신합니다.")
+    else:
+        print("   ⚠️ refresh token이 발급되지 않았습니다 — 만료 시 이 스크립트를 다시 실행해야 합니다.")
     print("   서버를 재시작하면 Notion 저장이 활성화됩니다.")
 
 

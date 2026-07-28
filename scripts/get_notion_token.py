@@ -97,9 +97,6 @@ def main() -> None:
         }
     )
 
-    print(f"\n브라우저에서 Notion 인증을 완료하세요:\n{auth_url}\n")
-    subprocess.run(["open", auth_url], check=False)
-
     # 콜백 대기
     code_holder: dict = {}
 
@@ -110,7 +107,14 @@ def main() -> None:
                 code_holder["code"] = q["code"][0]
                 body = "<h2>인증 완료 — 터미널로 돌아가세요. 이 창은 닫아도 됩니다.</h2>"
             else:
-                body = f"<h2>인증 실패</h2><pre>{self.path}</pre>"
+                # state 불일치 = 이전 실행에서 열어둔 낡은 탭으로 인증한 경우가 대부분.
+                # (CSRF 방지 장치라 짝이 맞지 않으면 거부하는 것이 정상 동작)
+                body = (
+                    "<h2>인증 실패</h2>"
+                    "<p>이전에 열어둔 인증 탭일 수 있습니다. 열려 있는 Notion 인증 탭을 모두 닫고, "
+                    "터미널에서 스크립트를 다시 실행해 새로 열리는 탭에서 진행하세요.</p>"
+                    f"<pre>{self.path}</pre>"
+                )
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
@@ -119,7 +123,21 @@ def main() -> None:
         def log_message(self, *args):
             pass
 
-    with http.server.HTTPServer(("localhost", CALLBACK_PORT), Handler) as server:
+    # 콜백 서버를 먼저 띄운다 — 실패하면 브라우저 탭을 열기 전에 멈추기 위해.
+    # 이전 실행이 콜백을 기다리며 살아 있으면 여기서 bind가 실패한다
+    try:
+        server = http.server.HTTPServer(("localhost", CALLBACK_PORT), Handler)
+    except OSError:
+        sys.exit(
+            f"\n❌ 포트 {CALLBACK_PORT}이 이미 사용 중입니다.\n"
+            "   이전 인증 프로세스가 콜백을 기다리는 중일 수 있습니다. 아래로 정리한 뒤 다시 실행하세요:\n"
+            "     pkill -f get_notion_token.py\n"
+        )
+
+    print(f"\n브라우저에서 Notion 인증을 완료하세요:\n{auth_url}\n")
+    subprocess.run(["open", auth_url], check=False)
+
+    with server:
         while "code" not in code_holder:
             server.handle_request()
 
